@@ -1,0 +1,102 @@
+MODULE DAU
+
+INTERFACE (Accum7..Accum0, Offset7..Offset0, UseAccum, UseOffset, PreOp, Inc,
+            Dec, UseX, UseS, Reset, Clock
+            -> DataAddr7..DataAddr0, XReg7..XReg0, SReg7..SReg0);
+
+
+" Description:  This module implements the data access unit for EE/CS 10a HW #8.
+"               It contains two registers X and S, and various indexing options.
+"
+" Inputs:       Accum[7..0]     - 8 bits of accumulator
+"               Offset[7..0]    - 8 bits of address offset input
+"               UseAccum        - Load X/S with Accum[7..0]
+"               UseOffset       - Low -> mask offset signals to 0
+"               PreOp           - Pre-inc/dec selection, as opposed to post-op
+"               Inc             - Perform increment
+"               Dec             - Perform decrement
+"               UseX            - Use the X register for calculations
+"               UseS            - Use the S register for calculations
+"               Reset           - X/S register reset
+"               Clock           - X/S register clock
+"
+" Outputs:      DataAddr[7..0]  - 8 bits of data address Output
+"               XReg7..XReg0    - 8 bits of X register
+"               SReg7..SReg0    - 8 bits of S register
+
+
+" Revision History:
+" 02/28/24      Gavin Hua       Initial Revision
+" 02/28/24      Gavin Hua       Fixed typos
+
+
+" Signal Declarations
+
+" Input Signals
+Accum7..Accum0                  pin; " 8 its of accumulator input
+Offset7..Offset0                pin; " 8 bits of address offset input
+UseAccum                        pin; " Load X/S with Accum[7..0]
+UseOffset                       pin; " Low -> offset set to 0 internally
+PreOp                           pin; " Pre-inc/dec selection
+Inc                             pin; " Perform increment
+Dec                             pin; " Perform decrement
+UseX                            pin; " Use the X register for calculations
+UseS                            pin; " Use the S register for calculations
+Reset                           pin; " X/S register reset
+Clock                           pin; " X/S register clock
+
+" Internal Signals
+Src7..Src0                      node; " Source selected signal
+IncDec                          node; " Signal an inc/dec to be performed
+IncDecCarry8..IncDecCarry0      node; " Carry signals for the adder in inc/dec
+IncDecOut7..IncDecOut0          node; " Result of inc/dec
+Carry8..Carry0                  node; " Carry signals for the address adder
+
+" Output Signals
+DataAddr7..DataAddr0            pin; " 8 bits of data address output
+XReg7..XReg0                    pin ISTYPE 'REG'; " 8 bits of X register
+SReg7..SReg0                    pin ISTYPE 'REG'; " 8 bits of S register
+
+" Busses
+Accum = [Accum7..Accum0];
+Offset = [Offset7..Offset0];
+Src = [Src7..Src0];
+" Operand for the inc/dec operation: 0, 1, or -1
+IncDecOp = [Dec, Dec, Dec, Dec, Dec, Dec, Dec, IncDec];
+IncDecCarry = [IncDecCarry8..IncDecCarry0];
+IncDecOut = [IncDecOut7..IncDecOut0];
+Carry = [Carry8..Carry0];
+DataAddr = [DataAddr7..DataAddr0];
+XReg = [XReg7..XReg0];
+SReg = [SReg7..SReg0];
+
+
+
+EQUATIONS
+" Configure registers
+XReg.CLK = Clock;
+SReg.CLK = Clock;
+XReg.CLR = !Reset;
+SReg.CLR = !Reset;
+
+" Source select: X, S, or 0
+Src = (XReg & UseX) # (SReg & UseS);
+
+" Increment/Decrement operation (adder), IncDecOp is either -1 or 1 or 0
+IncDec = Inc # Dec; " If there is an inc/dec, the lowest bit should be 1
+IncDecCarry0 = 0;
+IncDecOut = Src $ IncDecOp $ IncDecCarry[7..0];
+IncDecCarry[8..1] = (Src & IncDecOp) # (IncDecCarry[7..0] & (Src $ IncDecOp));
+
+" Store the result back into X or S, or load the accumulator into X or S
+XReg := (!UseAccum & ((IncDecOut & UseX) # (XReg & !UseX))) # (UseAccum & Accum);
+SReg := (!UseAccum & ((IncDecOut & UseS) # (SReg & !UseS))) # (UseAccum & Accum);
+
+" Add the increment/decrement result or the source with the offset or 0
+" If pre-op, select the result of inc/dec, if post-op, use the source directly
+Carry0 = 0;
+DataAddr = ((Src & !PreOp) # (IncDecOut & PreOp)) $ (Offset & UseOffset) $ Carry[7..0];
+Carry[8..1] = (((Src & !PreOp) # (IncDecOut & PreOp)) & (Offset & UseOffset))
+                # (Carry[7..0] & (((Src & !PreOp) # (IncDecOut & PreOp)) 
+                                        $ (Offset & UseOffset)));
+END DAU

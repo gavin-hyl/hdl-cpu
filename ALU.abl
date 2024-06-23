@@ -1,0 +1,173 @@
+MODULE           ALU
+INTERFACE (Data7..Data0, MaskSZ, MaskCV, CarryIn, UseAdder, UseSR, Subtract, 
+            LogicMux3..LogicMux0, UseCarry, MaskAccum, HoldAccum, LoadFlags, 
+            ClearFlags, ShiftSR, LogicSR, LeftSR, Reset, Clock
+            -> Accum7..Accum0, Flags7..Flags0);
+
+" Description:  This module implements the ALU logic for EE/CS 10a Homework #7.
+"               It implements arithmetic, shift, and logic operations, and flag
+"               computations.
+"
+" Inputs:       Data[7..0]          - 8 bits of data input
+"               MaskSZ              - Mask changes to sign and zero flags
+"               MaskCV              - Mask changes to carry and overflow flags
+"               CarryIn             - Force the carry in for the ALU and
+"                                     shifter/rotator to be 1
+"               UseAdder            - Store adder result into the accumulator
+"               UseSR               - Set accumulator to shifter/rotator result
+"               Subtract            - Signal an arithmetic subtraction
+"               UseCarry            - Set the carry bit using the carry flag
+"               LogicMux[3..0]      - Inputs to the F-block. Some examples are
+"                                     included below.
+"                                     A     = [1, 1, 0, 0]
+"                                     B     = [1, 0, 1, 0]
+"                                     NOTA  = [0, 0, 1, 1]
+"                                     NOTB  = [0, 1, 0, 1]
+"                                     AND   = [1, 0, 0, 0]
+"                                     OR    = [1, 1, 1, 0]
+"                                     XOR   = [0, 1, 1, 0]
+"               MaskAccum           - Mask the accumulator input to the adder
+"               HoldAccum           - Make no changes to the accumulator
+"               ShiftSR             - Signal shifter/rotator to perform shift,
+"                                     as opposed to a rotate
+"               LogicSR             - Signal shifter/rotator to perform logic 
+"                                     shift, as opposed to a arithmetic shift.
+"                                     Only used when ShiftSR is active.
+"               LeftSR              - Signal shifter/rotator to perform left s/r
+"               LoadFlags           - Load the flags using Data7..0
+"               ClearFlags          - Clear all flags
+"               Reset               - system reset
+"               Clock               - system clock
+"
+" Outputs:      Accum7..0           - 8 bits of accumulator output (active low) 
+"               Flags7..0           - 8 bits of flag output (active low)
+
+
+" Revision History:
+" 02/21/24   Gavin Hua    Initial revision
+" 02/24/24   Gavin Hua    Completed basic architecture
+" 02/25/24   Gavin Hua    Added set and clear flags signals, debugged
+" 02/26/24   Gavin Hua    Added shifter/rotator functionality
+
+
+
+" Signal Declarations
+
+" Input Signals
+Data7..Data0            pin; " Optional operand to ALU
+MaskSZ                  pin; " Mask sign and zero flags
+MaskCV                  pin; " Mask carry and overflow flags
+CarryIn                 pin; " Carry for the borrow
+UseAdder                pin; " Use the adder
+UseSR                   pin; " Use the shifter/rotator
+Subtract                pin; " Inverts the carry result of the adder
+LogicMux3..LogicMux0    pin; " F-block input signals
+MaskAccum               pin; " Mask the accumulator in the adder block
+HoldAccum               pin; " Hold accumulator value
+ClearFlags              pin; " This does what you think it does =)
+LoadFlags               pin; " Load the flags using Data7..0
+UseCarry                pin; " Use the carry flag as carry in for operations
+ShiftSR                 pin; " Signal a shift in the shifter/rotator
+LogicSR                 pin; " Signal a logic operation in the shifter/rotator
+LeftSR                  pin; " Signal a left shift/rotate in the shifter/rotator
+Reset                   pin; " Reset flags and accumulator, active low
+Clock                   pin; " Clock flags and accumulator
+
+" Internal Signals
+LogicOut7..LogicOut0    node; " Result of f-block
+AdderOut7..AdderOut0    node; " Result of adder
+SROut7..SROut0          node; " Result of shift/rotator
+SRCarry                 node; " Carry of shift/rotator
+Carry8..Carry0          node; " Carry bits of addition
+AdderCarry              node; " Unsigned integer overflow
+CompFlag3..CompFlag0    node; " Internally computed flags: I-U-CVSZ
+AuxCarry                node; " For BCD arithmetic, unused
+Parity                  node; " Parity of adder result, unused
+
+" Output Signals
+Accum7..Accum0          pin ISTYPE 'REG'; " 8-bit accumulator
+Flags7..Flags0          pin ISTYPE 'REG'; " I-U-CVSZ, active low
+
+" Vectors
+Data = [Data7..Data0];
+LogicOut = [LogicOut7..LogicOut0];
+AdderOut = [AdderOut7..AdderOut0];
+SROut = [SROut7..SROut0];
+Carry = [Carry8..Carry0];
+Accum = [Accum7..Accum0];
+Flags = [Flags7..Flags0];
+CompFlags = [CompFlag3..CompFlag0];
+
+" For the F-block's logic mux 9..6
+" AND = [1, 0, 0, 0]
+" OR = [1, 1, 1, 0]
+" XOR = [0, 1, 1, 0]
+" NOTA = [0, 0, 1, 1] Negates operand A (the accumulator)
+" NOTB = [0, 1, 0, 1] Negates operand B
+" A = [1, 1, 0, 0] Passes operand A
+" B = [1, 0, 1, 0] Passes operand B
+
+EQUATIONS
+" Configure registers
+Accum.CLK = Clock;
+Accum.CLR = !Reset;
+Flags.CLK = Clock;
+Flags.CLR = !Reset;
+
+" Logic (f-block)
+LogicOut = (LogicMux3 & (Accum & Data))
+            # (LogicMux2 & (Accum & !Data))
+            # (LogicMux1 & (!Accum & Data))
+            # (LogicMux0 & (!Accum & !Data));
+
+" Adder: basic 8-bit adder
+Carry0 = CarryIn # (UseCarry & (Flags3 $ Subtract));
+AdderOut = (Accum & !MaskAccum) $ LogicOut $ Carry[7..0];
+Carry[8..1] = ((Accum & !MaskAccum) & LogicOut) 
+                # (Carry[7..0] & ((Accum & !MaskAccum) $ LogicOut));
+AdderCarry = Carry8 $ Subtract;
+
+" Shift/Rotator
+" Low bit: LSL -> 0, RLC -> Carry, ASR/LSR/RRC/ROR -> Accum1, ROL -> Accum7
+SROut0 = (!LeftSR & Accum1) # (LeftSR & UseCarry & Flags3) # (LeftSR & !LogicSR & !UseCarry & Accum7);
+" Middle bits: Left S/R -> lower bit, Right S/R -> higher bit
+SROut[6..1] = (Accum[5..0] & LeftSR) # (Accum[7..2] & !LeftSR);
+" High bit: LSL/RLC/ROL -> Accum6, ASR -> Accum7, LSR -> 0, ROL -> Accum0, RRC -> Carry
+SROut7 = (LeftSR & Accum6) # (!LeftSR & ((ShiftSR & !LogicSR & Accum7)
+                                        # (!ShiftSR & UseCarry & Flags3)
+                                        # (!ShiftSR & !UseCarry & Accum0)));
+" Carry bit: Left S/R -> Accum7, Right S/R -> Accum0
+SRCarry = (LeftSR & Accum7) # (!LeftSR & Accum0);
+
+" Flag computation
+" Carry
+CompFlag3 = (AdderCarry & UseAdder) # (SRCarry & UseSR);
+" Overflow
+CompFlag2 = (UseAdder & ((AdderOut7 & !(Accum7 & !MaskAccum) & !LogicOut7) 
+                        # (!AdderOut7 & (Accum7 & !MaskAccum) & LogicOut7)))
+            # (UseSR & (SRCarry $ SROut7));
+" Sign
+CompFlag1 = (AdderOut7 & UseAdder) # (SROut7 & UseSR);
+" Zero
+CompFlag0 = (UseAdder & !(AdderOut7 # AdderOut6 # AdderOut5 # AdderOut4 
+                            # AdderOut3 # AdderOut2 # AdderOut1 # AdderOut0))
+            # (UseSR & !(SROut7 # SROut6 # SROut5 # SROut4 # SROut3 # SROut2 
+                        # SROut1 # SROut0));
+
+" Set output pins
+Accum := (!HoldAccum & ((UseAdder & AdderOut) # (UseSR & SROut)))
+         # (HoldAccum & Accum);
+" Flags are active low.
+Flags7 = !ClearFlags & ((Flags7 & !LoadFlags) # (Data7 & LoadFlags));
+Flags6 = 0;
+Flags5 = !ClearFlags & ((Flags5 & !LoadFlags) # (Data5 & LoadFlags));
+Flags4 = 0;
+
+" Flags[7..4] := !ClearFlags & ((Flags[7..4] & !LoadFlags) # (Data[7..4] & LoadFlags));
+Flags[3..2] := !ClearFlags & ((!LoadFlags & ((CompFlags[3..2] & !MaskCV) 
+                                                # (Flags[3..2] & MaskCV)))
+                                # (LoadFlags & Data[3..2]));
+Flags[1..0] := !ClearFlags & ((!LoadFlags & ((CompFlags[1..0] & !MaskSZ) 
+                                                # (Flags[1..0] & MaskSZ)))
+                                # (LoadFlags & Data[1..0]));
+END ALU

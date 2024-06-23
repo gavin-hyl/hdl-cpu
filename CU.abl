@@ -1,0 +1,450 @@
+MODULE      CU
+
+INTERFACE (Instr15..Instr0, Flags7..Flags0, Reset, Clock
+            -> ALU_MaskSZ, ALU_MaskCV, ALU_CarryIn, ALU_UseAdder, ALU_UseSR,
+                ALU_Subtract, ALU_LogicMux3..ALU_LogicMux0, ALU_UseCarry,
+                ALU_MaskAccum, ALU_HoldAccum, ALU_LoadFlags, ALU_ClearFlags,
+                ALU_ShiftSR, ALU_LogicSR, ALU_LeftSR, ALU_InputMux1,
+                ALU_InputMux0,
+               DAU_UseAccum, DAU_UseOffset, DAU_PreOp, DAU_Inc, DAU_Dec,
+                DAU_UseX, DAU_UseS,
+               PAU_Direct, PAU_Relative, PAU_Hold, PAU_RTS0, PAU_RTS1, PAU_Inc,
+                PAU_FromIR,
+               RD, WR, IO, DDB_Mux1, DDB_Mux0, IR15..IR0);
+
+" Description:  This module implements the control unit for EE/CS 10a HW #10.
+"               It contains an instruction register and an instruction decoder,
+"               and sets the control signals for the ALU and MIU (PAU + MAU). It
+"               also passes the tests for IO instructions and NEG.
+"
+" Inputs:       Instr[15..0]    - 16 bits of program data bus input
+"               Flags[7..0]     - 8 bits of ALU flags
+"               Reset           - instruction register reset
+"               Clock           - instruction register clock
+"
+" Outputs:      ALU_MaskSZ      - ALU: Mask sign and zero flags
+"               ALU_MaskCV      - ALU: Mask carry and overflow flags
+"               ALU_CarryIn     - ALU: Force a carry/borrow
+"               ALU_UseAdder    - ALU: Use the adder
+"               ALU_UseSR       - ALU: Use the shifter/rotator
+"               ALU_Subtract    - ALU: Subtract in adder
+"               ALU_LogicMux0   - ALU: F-block input 0
+"               ALU_LogicMux1   - ALU: F-block input 1
+"               ALU_LogicMux2   - ALU: F-block input 2
+"               ALU_LogicMux3   - ALU: F-block input 3, some examples:
+"                                 A     = [1, 1, 0, 0]
+"                                 B     = [1, 0, 1, 0]
+"                                 NOTA  = [0, 0, 1, 1]
+"                                 NOTB  = [0, 1, 0, 1]
+"                                 AND   = [1, 0, 0, 0]
+"                                 OR    = [1, 1, 1, 0]
+"                                 XOR   = [0, 1, 1, 0]
+"               ALU_UseCarry    - ALU: Use carry as CarryIn
+"               ALU_MaskAccum   - ALU: Mask accum in adder
+"               ALU_HoldAccum   - ALU: Hold accum value
+"               ALU_LoadFlags   - ALU: Set flags using Data[7..0]
+"               ALU_ClearFlags  - ALU: Set all flags to 0
+"               ALU_ShiftSR     - ALU: Shift operation
+"               ALU_LogicSR     - ALU: Logic operation
+"               ALU_LeftSR      - ALU: Left operation
+"               ALU_InputMux0   - ALU: Data input select 0
+"               ALU_InputMux1   - ALU: Data input select 1, selection values are:
+"                                 [0, 0] -> Data DB
+"                                 [0, 1] -> Instruction register
+"                                 [1, 0] -> X register
+"                                 [1, 1] -> S register
+"               DAU_UseAccum    - DAU: Set X/S using accum
+"               DAU_UseOffset   - DAU: Add source with offset bus
+"               DAU_PreOp       - DAU: Op before address output
+"               DAU_Inc         - DAU: Increment source
+"               DAU_Dec         - DAU: Decrement source
+"               DAU_UseX        - DAU: Use X register as source
+"               DAU_UseS        - DAU: Use S register as source 
+"               PAU_Direct      - PAU: Direct jump
+"               PAU_Relative    - PAU: Relative jump
+"               PAU_Hold        - PAU: Hold program counter
+"               PAU_RTS0        - PAU: First return instruction
+"               PAU_RTS1        - PAU: Second return instruction
+"               PAU_Inc         - PAU: Increment program counter 
+"               PAU_FromIR      - PAU: Offset source select (IR/DDB)
+"               RD              - Read memory
+"               WR              - Write memory
+"               IO              - Connect to IO device
+"               DDB_Mux0        - DataDB output select 0
+"               DDB_Mux1        - DataDB output select 1, selection values are:
+"                                 [0, 0] -> Accumulator
+"                                 [0, 1] -> Flags
+"                                 [1, 0] -> Low 8 bits of program counter
+"                                 [1, 1] -> High 5 bits of program counter
+"               IR15..IR0       - Instruction register
+
+" Revision History
+" 03/06/24  Gavin Hua   Initial Revision
+" 03/10/24  Gavin Hua   Finished debugging HW #9
+" 03/12/24  Gavin Hua   Added state machine
+" 03/14/24  Gavin Hua   Finished debugging HW #10, changed truth table to state machine
+
+" Signal Declarations
+" Input Signals
+Instr15..Instr0         pin; " 16 bits of instruction
+Flags7..Flags0          pin; " I - U - C V S Z
+Reset                   pin; " IR reset signal, active low
+Clock                   pin; " IR clock signal
+
+" Internal Signals
+LoadIR                  node ISTYPE 'COM'; " Load IR with Instr[15..0]
+InCALL                  node ISTYPE 'REG'; " 1 for CALL, 0 for RTS/normal
+State2..State0          node ISTYPE 'REG'; " Binary counter from 1-4 for RTS
+                                           " 1-5 for CALL, 0 for normal execution
+
+" Output Signals
+ALU_MaskSZ              pin; " ALU: Mask sign and zero flags
+ALU_MaskCV              pin; " ALU: Mask carry and overflow flags
+ALU_CarryIn             pin; " ALU: Force a carry/borrow
+ALU_UseAdder            pin; " ALU: Use the adder
+ALU_UseSR               pin; " ALU: Use the shifter/rotator
+ALU_Subtract            pin; " ALU: Subtract in adder
+ALU_LogicMux0           pin; " ALU: F-block input 0
+ALU_LogicMux1           pin; " ALU: F-block input 1
+ALU_LogicMux2           pin; " ALU: F-block input 2
+ALU_LogicMux3           pin; " ALU: F-block input 3
+ALU_UseCarry            pin; " ALU: Use carry as CarryIn
+ALU_MaskAccum           pin; " ALU: Mask accum in adder
+ALU_HoldAccum           pin; " ALU: Hold accum value
+ALU_LoadFlags           pin; " ALU: Set flags using Data[7..0]
+ALU_ClearFlags          pin; " ALU: Set all flags to 0
+ALU_ShiftSR             pin; " ALU: Shift operation
+ALU_LogicSR             pin; " ALU: Logic operation
+ALU_LeftSR              pin; " ALU: Left operation
+ALU_InputMux0           pin; " ALU: Data input select 0
+ALU_InputMux1           pin; " ALU: Data input select 1
+DAU_UseAccum            pin; " DAU: Set X/S using accum
+DAU_UseOffset           pin; " DAU: Add source with offset bus
+DAU_PreOp               pin; " DAU: Op before address output
+DAU_Inc                 pin; " DAU: Increment source
+DAU_Dec                 pin; " DAU: Decrement source
+DAU_UseX                pin; " DAU: Use X register as source
+DAU_UseS                pin; " DAU: Use S register as source 
+PAU_Direct              pin; " PAU: Direct jump
+PAU_Relative            pin; " PAU: Relative jump
+PAU_Hold                pin; " PAU: Hold program counter
+PAU_RTS0                pin; " PAU: First return instruction
+PAU_RTS1                pin; " PAU: Second return instruction
+PAU_Inc                 pin; " PAU: Increment program counter 
+PAU_FromIR              pin; " PAU: Offset source select
+RD                      pin; " Read memory
+WR                      pin; " Write memory
+IO                      pin; " Connect to IO device
+DDB_Mux0                pin; " DataDB output select 0
+DDB_Mux1                pin; " DataDB output select 1
+IR15..IR0               pin ISTYPE 'REG';     " Instruction register
+
+" Busses
+Instr = [Instr15..Instr0];
+IR = [IR15..IR0];
+StateBits = [InCALL, State2, State1, State0];
+Inputs = [IR15..IR0, Flags5, Flags3..Flags0];
+Outputs = [ALU_MaskSZ, ALU_MaskCV, ALU_CarryIn, ALU_UseAdder, ALU_UseSR, 
+            ALU_Subtract, ALU_LogicMux0, ALU_LogicMux1, ALU_LogicMux2, 
+            ALU_LogicMux3, ALU_UseCarry, ALU_MaskAccum, ALU_HoldAccum, 
+            ALU_LoadFlags, ALU_ClearFlags, ALU_ShiftSR, ALU_LogicSR,
+            ALU_LeftSR, ALU_InputMux1, ALU_InputMux0, DAU_UseAccum, 
+            DAU_UseOffset, DAU_PreOp, DAU_Inc, DAU_Dec, DAU_UseX, DAU_UseS,
+            PAU_Direct, PAU_Relative, PAU_Hold, PAU_RTS0, PAU_RTS1,
+            PAU_Inc, PAU_FromIR, RD, WR, IO, DDB_Mux1, DDB_Mux0, LoadIR];
+
+" Return0 and Call0 are executed in Regular
+Regular = [0, 0, 0, 0];
+Return1 = [0, 0, 1, 0];
+Return2 = [0, 0, 1, 1];
+Call1 = [1, 0, 1, 0];
+Call2 = [1, 0, 1, 1];
+Call3 = [1, 1, 0, 0];
+
+
+EQUATIONS
+
+IR.CLK = Clock;
+StateBits.CLK = Clock;
+IR.CLR = !Reset;
+StateBits.CLR = !Reset;
+
+IR := (!LoadIR & IR) # (LoadIR & Instr);
+
+STATE_DIAGRAM StateBits
+
+STATE Return1:
+    Outputs = [1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0];
+    GOTO Return2;
+
+STATE Return2:
+    Outputs = [1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, .X., .X., 1];
+    GOTO Regular;
+
+STATE Call1:
+    Outputs = [1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 1, 0];
+    GOTO Call2;
+
+STATE Call2:
+    Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 1, 0, 1, 0, 1, 0, 0];
+    GOTO Call3;
+
+STATE Call3:
+    Outputs = [1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, .X., .X., 1];
+    GOTO Regular;
+
+STATE Regular:
+" This was originally a truth table...it got reformatted because no way was found to make it compatible with the state machine
+" JMP
+WHEN (Inputs == [1, 1, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, .X., .X., 1];}
+" OUT p
+WHEN (Inputs == [1, 0, 1, 1, 0, 0, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 0, 1, 1, 0, 0, 1];}
+" ST S+, o
+WHEN (Inputs == [1, 0, 1, 1, 0, 0, 1, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 1, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, .X., 0, 1, 0, 0, 0, 1];}
+" ST S, o
+WHEN (Inputs == [1, 0, 1, 1, 0, 0, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, .X., 0, 1, 0, 0, 0, 1];}
+" ST X+, o
+WHEN (Inputs == [1, 0, 1, 1, 0, 1, 1, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 1, .X., 0, 1, 0, 0, 0, 1];}
+" ST X, o
+WHEN (Inputs == [1, 0, 1, 1, 0, 1, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, .X., 0, 1, 0, 0, 0, 1];}
+" ST S-, o
+WHEN (Inputs == [1, 0, 1, 1, 1, 0, 1, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 1, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 1, .X., 0, 1, 0, 0, 0, 1];}
+" ST X-, o
+WHEN (Inputs == [1, 0, 1, 1, 1, 1, 1, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 1, .X., 0, 1, 0, 0, 0, 1];}
+" STD m
+WHEN (Inputs == [1, 0, 1, 0, 0, 0, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 0, 1, 0, 0, 0, 1];}
+" ST +S, o
+WHEN (Inputs == [1, 0, 1, 0, 0, 0, 1, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 1, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, .X., 0, 1, 0, 0, 0, 1];}
+" ST +X, o
+WHEN (Inputs == [1, 0, 1, 0, 0, 1, 1, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 1, 1, 1, 0, 1, 0, 0, 0, 0, 0, 0, 1, .X., 0, 1, 0, 0, 0, 1];}
+" ST -S, o
+WHEN (Inputs == [1, 0, 1, 0, 1, 0, 1, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 1, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 1, .X., 0, 1, 0, 0, 0, 1];}
+" ST -X, o
+WHEN (Inputs == [1, 0, 1, 0, 1, 1, 1, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 1, 1, 0, 1, 1, 0, 0, 0, 0, 0, 0, 1, .X., 0, 1, 0, 0, 0, 1];}
+" IN p
+WHEN (Inputs == [1, 0, 0, 1, 0, 0, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [1, 1, 0, 1, 0, 0, 0, 1, 0, 1, 0, 1, 0, 0, 0, .X., .X., .X., 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 1, 0, 1, .X., .X., 1];}
+" LD S+, o
+WHEN (Inputs == [1, 0, 0, 1, 0, 0, 1, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [1, 1, 0, 1, 0, 0, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, .X., 1, 0, 0, .X., .X., 1];}
+" LD S, o
+WHEN (Inputs == [1, 0, 0, 1, 0, 0, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [1, 1, 0, 1, 0, 0, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, .X., 1, 0, 0, .X., .X., 1];}
+" LD X+, o
+WHEN (Inputs == [1, 0, 0, 1, 0, 1, 1, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [1, 1, 0, 1, 0, 0, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 1, .X., 1, 0, 0, .X., .X., 1];}
+" LD X, o
+WHEN (Inputs == [1, 0, 0, 1, 0, 1, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [1, 1, 0, 1, 0, 0, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, .X., 1, 0, 0, .X., .X., 1];}
+" LD S-, o
+WHEN (Inputs == [1, 0, 0, 1, 1, 0, 1, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [1, 1, 0, 1, 0, 0, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 1, .X., 1, 0, 0, .X., .X., 1];}
+" LD X-, o
+WHEN (Inputs == [1, 0, 0, 1, 1, 1, 1, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [1, 1, 0, 1, 0, 0, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 1, .X., 1, 0, 0, .X., .X., 1];}
+" LDD m
+WHEN (Inputs == [1, 0, 0, 0, 0, 0, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [1, 1, 0, 1, 0, 0, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 1, 0, 0, .X., .X., 1];}
+" LD +S, o
+WHEN (Inputs == [1, 0, 0, 0, 0, 0, 1, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [1, 1, 0, 1, 0, 0, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, .X., 1, 0, 0, .X., .X., 1];}
+" LD +X, o
+WHEN (Inputs == [1, 0, 0, 0, 0, 1, 1, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [1, 1, 0, 1, 0, 0, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 1, 0, 0, 0, 0, 0, 0, 1, .X., 1, 0, 0, .X., .X., 1];}
+" LDI k
+WHEN (Inputs == [1, 0, 0, 0, 1, 0, 0, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [1, 1, 0, 1, 0, 0, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 0, 0, 0, .X., .X., 1];}
+" LD -S, o
+WHEN (Inputs == [1, 0, 0, 0, 1, 0, 1, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [1, 1, 0, 1, 0, 0, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 1, .X., 1, 0, 0, .X., .X., 1];}
+" LD -X, o
+WHEN (Inputs == [1, 0, 0, 0, 1, 1, 1, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [1, 1, 0, 1, 0, 0, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 1, 1, 0, 0, 0, 0, 0, 0, 1, .X., 1, 0, 0, .X., .X., 1];}
+" LSR
+WHEN (Inputs == [0, 1, 1, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, .X., .X., .X., .X., .X.]) THEN {Outputs = [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, .X., .X., 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 1, 0, 0, .X., .X., 1];}
+" ASR
+WHEN (Inputs == [0, 1, 1, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, .X., .X., .X., .X., .X.]) THEN {Outputs = [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, .X., .X., 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 1, 0, 0, .X., .X., 1];}
+" ROR
+WHEN (Inputs == [0, 1, 1, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, .X., .X., .X., .X., .X.]) THEN {Outputs = [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, .X., .X., 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 1, 0, 0, .X., .X., 1];}
+" RRC
+WHEN (Inputs == [0, 1, 1, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 1, .X., .X., .X., .X., .X.]) THEN {Outputs = [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, .X., .X., 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 1, 0, 0, .X., .X., 1];}
+" OR m
+WHEN (Inputs == [0, 1, 1, 1, 0, 1, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [0, 1, 0, 1, 0, 0, 0, 1, 1, 1, 0, 1, 0, 0, 0, .X., .X., .X., 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 1, 0, 0, .X., .X., 1];}
+" OR X, o
+WHEN (Inputs == [0, 1, 1, 1, 0, 1, 0, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [0, 1, 0, 1, 0, 0, 0, 1, 1, 1, 0, 1, 0, 0, 0, .X., .X., .X., 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, .X., 1, 0, 0, .X., .X., 1];}
+" OR S, o
+WHEN (Inputs == [0, 1, 1, 1, 0, 1, 1, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [0, 1, 0, 1, 0, 0, 0, 1, 1, 1, 0, 1, 0, 0, 0, .X., .X., .X., 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, .X., 1, 0, 0, .X., .X., 1];}
+" ORI k
+WHEN (Inputs == [0, 1, 1, 1, 0, 1, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [0, 1, 0, 1, 0, 0, 0, 1, 1, 1, 0, 1, 0, 0, 0, .X., .X., .X., 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 0, 0, 0, .X., .X., 1];}
+" DEC
+WHEN (Inputs == [0, 1, 1, 1, 1, 0, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [0, 0, 0, 1, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, .X., .X., .X., 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 0, 0, 0, .X., .X., 1];}
+" ADC m
+WHEN (Inputs == [0, 1, 1, 0, 0, 0, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 0, 0, 0, 0, .X., .X., .X., 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 1, 0, 0, .X., .X., 1];}
+" ADC X, o
+WHEN (Inputs == [0, 1, 1, 0, 0, 0, 0, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 0, 0, 0, 0, .X., .X., .X., 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, .X., 1, 0, 0, .X., .X., 1];}
+" ADC S, o
+WHEN (Inputs == [0, 1, 1, 0, 0, 0, 1, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 0, 0, 0, 0, .X., .X., .X., 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, .X., 1, 0, 0, .X., .X., 1];}
+" ADCI k
+WHEN (Inputs == [0, 1, 1, 0, 0, 0, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 0, 0, 0, 0, .X., .X., .X., 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 0, 0, 0, .X., .X., 1];}
+" ADD m
+WHEN (Inputs == [0, 1, 1, 0, 1, 0, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, .X., .X., .X., 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 1, 0, 0, .X., .X., 1];}
+" ADD X, o
+WHEN (Inputs == [0, 1, 1, 0, 1, 0, 0, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, .X., .X., .X., 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, .X., 1, 0, 0, .X., .X., 1];}
+" ADD S, o
+WHEN (Inputs == [0, 1, 1, 0, 1, 0, 1, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, .X., .X., .X., 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, .X., 1, 0, 0, .X., .X., 1];}
+" ADDI k
+WHEN (Inputs == [0, 1, 1, 0, 1, 0, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, .X., .X., .X., 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 0, 0, 0, .X., .X., 1];}
+" RLC
+WHEN (Inputs == [0, 1, 0, 1, 0, 0, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, .X., .X., 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 0, 0, 0, .X., .X., 1];}
+" ROL
+WHEN (Inputs == [0, 1, 0, 1, 0, 0, 1, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., .X., 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 0, 0, 0, .X., .X., 0];}
+" LSL
+WHEN (Inputs == [0, 1, 0, 1, 1, 0, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, .X., .X., 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 0, 0, 0, .X., .X., 1];}
+" AND m
+WHEN (Inputs == [0, 1, 0, 0, 0, 1, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [0, 1, 0, 1, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, .X., .X., .X., 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 1, 0, 0, .X., .X., 1];}
+" AND X, o
+WHEN (Inputs == [0, 1, 0, 0, 0, 1, 0, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [0, 1, 0, 1, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, .X., .X., .X., 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, .X., 1, 0, 0, .X., .X., 1];}
+" AND S, o
+WHEN (Inputs == [0, 1, 0, 0, 0, 1, 1, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [0, 1, 0, 1, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, .X., .X., .X., 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, .X., 1, 0, 0, .X., .X., 1];}
+" ANDI k
+WHEN (Inputs == [0, 1, 0, 0, 0, 1, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [0, 1, 0, 1, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, .X., .X., .X., 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 0, 0, 0, .X., .X., 1];}
+" TST m
+WHEN (Inputs == [0, 1, 0, 0, 1, 1, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [0, 1, 0, 1, 0, 0, 0, 0, 0, 1, 0, 1, 1, 0, 0, .X., .X., .X., 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 1, 0, 0, .X., .X., 1];}
+" TST X, o
+WHEN (Inputs == [0, 1, 0, 0, 1, 1, 0, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [0, 1, 0, 1, 0, 0, 0, 0, 0, 1, 0, 1, 1, 0, 0, .X., .X., .X., 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, .X., 1, 0, 0, .X., .X., 1];}
+" TST S, o
+WHEN (Inputs == [0, 1, 0, 0, 1, 1, 1, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [0, 1, 0, 1, 0, 0, 0, 0, 0, 1, 0, 1, 1, 0, 0, .X., .X., .X., 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, .X., 1, 0, 0, .X., .X., 1];}
+" TSTI k
+WHEN (Inputs == [0, 1, 0, 0, 1, 1, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [0, 1, 0, 1, 0, 0, 0, 0, 0, 1, 0, 1, 1, 0, 0, .X., .X., .X., 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 0, 0, 0, .X., .X., 1];}
+" CMP m
+WHEN (Inputs == [0, 0, 1, 1, 0, 0, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [0, 0, 1, 1, 0, 1, 1, 0, 1, 0, 0, 0, 1, 0, 0, .X., .X., .X., 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 1, 0, 0, .X., .X., 1];}
+" CMP X, o
+WHEN (Inputs == [0, 0, 1, 1, 0, 0, 0, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [0, 0, 1, 1, 0, 1, 1, 0, 1, 0, 0, 0, 1, 0, 0, .X., .X., .X., 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, .X., 1, 0, 0, .X., .X., 1];}
+" CMP S, o
+WHEN (Inputs == [0, 0, 1, 1, 0, 0, 1, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [0, 0, 1, 1, 0, 1, 1, 0, 1, 0, 0, 0, 1, 0, 0, .X., .X., .X., 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, .X., 1, 0, 0, .X., .X., 1];}
+" CMPI k
+WHEN (Inputs == [0, 0, 1, 1, 0, 0, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [0, 0, 1, 1, 0, 1, 1, 0, 1, 0, 0, 0, 1, 0, 0, .X., .X., .X., 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 0, 0, 0, .X., .X., 1];}
+" XOR m
+WHEN (Inputs == [0, 0, 1, 1, 0, 1, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [0, 1, 0, 1, 0, 0, 0, 1, 1, 0, 0, 1, 0, 0, 0, .X., .X., .X., 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 1, 0, 0, .X., .X., 1];}
+" XOR X, o
+WHEN (Inputs == [0, 0, 1, 1, 0, 1, 0, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [0, 1, 0, 1, 0, 0, 0, 1, 1, 0, 0, 1, 0, 0, 0, .X., .X., .X., 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, .X., 1, 0, 0, .X., .X., 1];}
+" XOR S, o
+WHEN (Inputs == [0, 0, 1, 1, 0, 1, 1, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [0, 1, 0, 1, 0, 0, 0, 1, 1, 0, 0, 1, 0, 0, 0, .X., .X., .X., 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, .X., 1, 0, 0, .X., .X., 1];}
+" XORI k
+WHEN (Inputs == [0, 0, 1, 1, 0, 1, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [0, 1, 0, 1, 0, 0, 0, 1, 1, 0, 0, 1, 0, 0, 0, .X., .X., .X., 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 0, 0, 0, .X., .X., 1];}
+" NEG
+WHEN (Inputs == [0, 0, 1, 0, 0, 1, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [0, 0, 1, 1, 0, 1, 1, 1, 0, 0, 0, 1, 0, 0, 0, .X., .X., .X., .X., .X., 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 0, 0, 0, .X., .X., 1];}
+" NOT
+WHEN (Inputs == [0, 0, 1, 0, 1, 1, 0, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [0, 1, 0, 1, 0, 0, 1, 1, 0, 0, 0, 1, 0, 0, 0, .X., .X., .X., 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 0, 0, 0, .X., .X., 1];}
+" SUB m
+WHEN (Inputs == [0, 0, 0, 1, 0, 0, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [0, 0, 1, 1, 0, 1, 1, 0, 1, 0, 0, 0, 0, 0, 0, .X., .X., .X., 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 1, 0, 0, .X., .X., 1];}
+" SUB X, o
+WHEN (Inputs == [0, 0, 0, 1, 0, 0, 0, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [0, 0, 1, 1, 0, 1, 1, 0, 1, 0, 0, 0, 0, 0, 0, .X., .X., .X., 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, .X., 1, 0, 0, .X., .X., 1];}
+" SUB S, o
+WHEN (Inputs == [0, 0, 0, 1, 0, 0, 1, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [0, 0, 1, 1, 0, 1, 1, 0, 1, 0, 0, 0, 0, 0, 0, .X., .X., .X., 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, .X., 1, 0, 0, .X., .X., 1];}
+" SUBI k
+WHEN (Inputs == [0, 0, 0, 1, 0, 0, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [0, 0, 1, 1, 0, 1, 1, 0, 1, 0, 0, 0, 0, 0, 0, .X., .X., .X., 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 0, 0, 0, .X., .X., 1];}
+" SBB m
+WHEN (Inputs == [0, 0, 0, 1, 1, 0, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [0, 0, 0, 1, 0, 1, 1, 0, 1, 0, 1, 0, 0, 0, 0, .X., .X., .X., 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 1, 0, 0, .X., .X., 1];}
+" SBB X, o
+WHEN (Inputs == [0, 0, 0, 1, 1, 0, 0, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [0, 0, 0, 1, 0, 1, 1, 0, 1, 0, 1, 0, 0, 0, 0, .X., .X., .X., 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, .X., 1, 0, 0, .X., .X., 1];}
+" SBB S, o
+WHEN (Inputs == [0, 0, 0, 1, 1, 0, 1, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [0, 0, 0, 1, 0, 1, 1, 0, 1, 0, 1, 0, 0, 0, 0, .X., .X., .X., 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, .X., 1, 0, 0, .X., .X., 1];}
+" SBBI k
+WHEN (Inputs == [0, 0, 0, 1, 1, 0, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [0, 0, 0, 1, 0, 1, 1, 0, 1, 0, 1, 0, 0, 0, 0, .X., .X., .X., 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 0, 0, 0, .X., .X., 1];}
+" NOP
+WHEN (Inputs == [0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, .X., .X., .X., .X., .X.]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 0, 0, 0, .X., .X., 1];}
+" INC
+WHEN (Inputs == [0, 0, 0, 0, 0, 0, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, .X., .X., .X., .X., .X., 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 0, 0, 0, .X., .X., 1];}
+" POPF
+WHEN (Inputs == [0, 0, 0, 0, 0, 0, 1, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [0, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 1, 0, .X., .X., .X., .X., .X., 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, .X., 1, 0, 0, .X., .X., 1];}
+" PUSHF
+WHEN (Inputs == [0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, .X., .X., .X., .X., .X.]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 1, .X., 0, 1, 0, 0, 1, 1];}
+" JL r
+WHEN (Inputs == [1, 0, 1, 1, 1, 0, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 0, 1, .X.]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, .X., .X., 1];}
+" JL r
+WHEN (Inputs == [1, 0, 1, 1, 1, 0, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, .X.]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, .X., .X., 1];}
+" JGE r
+WHEN (Inputs == [1, 0, 1, 1, 1, 0, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 0, 0, .X.]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, .X., .X., 1];}
+" JGE r
+WHEN (Inputs == [1, 0, 1, 1, 1, 0, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 1, .X.]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, .X., .X., 1];}
+" JNV r
+WHEN (Inputs == [1, 0, 1, 0, 1, 0, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 0, .X., .X.]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, .X., .X., 1];}
+" JV r
+WHEN (Inputs == [1, 0, 1, 0, 1, 0, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, .X., .X.]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, .X., .X., 1];}
+" JLE r
+WHEN (Inputs == [1, 0, 1, 0, 1, 1, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, .X., .X., 1];}
+" JLE r
+WHEN (Inputs == [1, 0, 1, 0, 1, 1, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 0, 1, .X.]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, .X., .X., 1];}
+" JLE r
+WHEN (Inputs == [1, 0, 1, 0, 1, 1, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, .X.]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, .X., .X., 1];}
+" JG r
+WHEN (Inputs == [1, 0, 1, 0, 1, 1, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 0, 0, 0]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, .X., .X., 1];}
+" JG r
+WHEN (Inputs == [1, 0, 1, 0, 1, 1, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 1, 0]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, .X., .X., 1];}
+" JNS r
+WHEN (Inputs == [1, 0, 0, 1, 1, 0, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 0, .X.]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, .X., .X., 1];}
+" JS r
+WHEN (Inputs == [1, 0, 0, 1, 1, 0, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, .X.]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, .X., .X., 1];}
+" JNE r
+WHEN (Inputs == [1, 0, 0, 1, 1, 1, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 0]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, .X., .X., 1];}
+" JE r
+WHEN (Inputs == [1, 0, 0, 1, 1, 1, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, .X., .X., 1];}
+" JA r
+WHEN (Inputs == [1, 0, 0, 0, 1, 0, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., 0, .X., .X., 0]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, .X., .X., 1];}
+" JBE r
+WHEN (Inputs == [1, 0, 0, 0, 1, 0, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, .X., .X., .X.]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, .X., .X., 1];}
+" JBE r
+WHEN (Inputs == [1, 0, 0, 0, 1, 0, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, .X., .X., 1];}
+" JNC r
+WHEN (Inputs == [1, 0, 0, 0, 1, 1, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., 0, .X., .X., .X.]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, .X., .X., 1];}
+" JC r
+WHEN (Inputs == [1, 0, 0, 0, 1, 1, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, .X., .X., .X.]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, .X., .X., 1];}
+" JNU r
+WHEN (Inputs == [1, 0, 1, 1, 1, 1, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X., 0, .X., .X., .X., .X.]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, .X., .X., 1];}
+" JU r
+WHEN (Inputs == [1, 0, 1, 1, 1, 1, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X., 1, .X., .X., .X., .X.]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, .X., .X., 1];}
+" JL r
+WHEN (Inputs == [1, 0, 1, 1, 1, 0, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 0, 0, .X.]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 0, 0, 0, .X., .X., 1];}
+" JL r
+WHEN (Inputs == [1, 0, 1, 1, 1, 0, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 1, .X.]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 0, 0, 0, .X., .X., 1];}
+" JGE r
+WHEN (Inputs == [1, 0, 1, 1, 1, 0, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 0, 1, .X.]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 0, 0, 0, .X., .X., 1];}
+" JGE r
+WHEN (Inputs == [1, 0, 1, 1, 1, 0, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, .X.]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 0, 0, 0, .X., .X., 1];}
+" JNV r
+WHEN (Inputs == [1, 0, 1, 0, 1, 0, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, .X., .X.]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 0, 0, 0, .X., .X., 1];}
+" JV r
+WHEN (Inputs == [1, 0, 1, 0, 1, 0, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 0, .X., .X.]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 0, 0, 0, .X., .X., 1];}
+" JLE r
+WHEN (Inputs == [1, 0, 1, 0, 1, 1, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 0, 0, 0]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 0, 0, 0, .X., .X., 1];}
+" JLE r
+WHEN (Inputs == [1, 0, 1, 0, 1, 1, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 1, 0]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 0, 0, 0, .X., .X., 1];}
+" JG r
+WHEN (Inputs == [1, 0, 1, 0, 1, 1, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 0, 0, 0, .X., .X., 1];}
+" JG r
+WHEN (Inputs == [1, 0, 1, 0, 1, 1, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 0, 1, .X.]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 0, 0, 0, .X., .X., 1];}
+" JG r
+WHEN (Inputs == [1, 0, 1, 0, 1, 1, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, .X.]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 0, 0, 0, .X., .X., 1];}
+" JNS r
+WHEN (Inputs == [1, 0, 0, 1, 1, 0, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, .X.]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 0, 0, 0, .X., .X., 1];}
+" JS r
+WHEN (Inputs == [1, 0, 0, 1, 1, 0, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 0, .X.]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 0, 0, 0, .X., .X., 1];}
+" JNE r
+WHEN (Inputs == [1, 0, 0, 1, 1, 1, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 0, 0, 0, .X., .X., 1];}
+" JE r
+WHEN (Inputs == [1, 0, 0, 1, 1, 1, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 0]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 0, 0, 0, .X., .X., 1];}
+" JA r
+WHEN (Inputs == [1, 0, 0, 0, 1, 0, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, .X., .X., .X.]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 0, 0, 0, .X., .X., 1];}
+" JA r
+WHEN (Inputs == [1, 0, 0, 0, 1, 0, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 0, 0, 0, .X., .X., 1];}
+" JBE r
+WHEN (Inputs == [1, 0, 0, 0, 1, 0, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., 0, .X., .X., 0]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 0, 0, 0, .X., .X., 1];}
+" JNC r
+WHEN (Inputs == [1, 0, 0, 0, 1, 1, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, .X., .X., .X.]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 0, 0, 0, .X., .X., 1];}
+" JC r
+WHEN (Inputs == [1, 0, 0, 0, 1, 1, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., 0, .X., .X., .X.]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 0, 0, 0, .X., .X., 1];}
+" JNU r
+WHEN (Inputs == [1, 0, 1, 1, 1, 1, 0, 0, .X., .X., .X., .X., .X., .X., .X., .X., 1, .X., .X., .X., .X.]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 0, 0, 0, .X., .X., 1];}
+" JU r
+WHEN (Inputs == [1, 0, 1, 1, 1, 1, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X., 0, .X., .X., .X., .X.]) THEN {Outputs = [1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., 1, 0, 0, .X., .X., .X., .X., .X., 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, .X., 0, 0, 0, .X., .X., 1];}
+" CALL0
+WHEN (Inputs == [1, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN {Outputs = [1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, .X., .X., 0];;}
+" RTS0
+WHEN (Inputs == [0, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, .X., .X., .X., .X., .X.]) THEN {Outputs = [1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0];}
+
+" Call0 has already been executed, so go to Call1
+" The .X.'s are necessary for some reason
+IF (Inputs == [1, 1, 1, .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X., .X.]) THEN Call1
+" Return0 has already been executed, so go to Return1
+ELSE IF  (Inputs == [0, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, .X., .X., .X., .X., .X.]) THEN Return1
+ELSE Regular;
+
+END CU

@@ -1,0 +1,100 @@
+MODULE PAU
+
+INTERFACE (Offset7..Offset0, Direct12..Direct0, Direct, Relative, Hold, RTS0, 
+            RTS1, Inc, Reset, Clock -> ProgAddr12..ProgAddr0, PC12..PC0);
+
+" Description: This module is the program address unit EE/CS 10a homework 6. It
+"              contains a program counter, and performs operations on it 
+"              according to the input signals, which allow for a direct jump, a
+"              relative jump, an increment, a hold, and processing different
+"              bytes of a return address.
+"
+" Inputs:      Offset[7..0]    - 8 bits of data or offset input
+"              Direct[12..0]   - 13 bits of address or data input
+"              Direct          - signal a direct jump
+"              Relative        - signal a relative jump
+"              Hold            - perform no operation
+"			   RTS0            - signal first byte of return
+"              RTS1            - signal second byte of return
+"              Inc             - increment the PC by 1
+"              Reset           - clear the PC
+"              Clock           - clock signal for the PC
+"
+" Outputs:     ProgAddr[12..0] - 13 bits of the program address output
+"              PC[12..0]       - 13 bits of program counter output
+
+" Revision History
+" 02/14/24   Gavin Hua    Initial revision
+" 02/15/24   Gavin Hua    Debugged logic
+
+
+" Signal Declarations
+
+" Input Signals
+Offset7..Offset0            pin;    " Data bus for relative jumps/RTS
+Direct12..Direct0           pin;    " Address bus for direct jumps
+Direct                      pin;    " Signals a direct jump
+Relative                    pin;    " Signals a relative jump
+Hold                        pin;    " Signals the PC to remain unchanged
+Reset                       pin;    " Connected to the CLR of the PC
+Clock                       pin;    " Connected to the CLK of the PC
+RTS0                        pin;    " Signals the first byte of RTS
+RTS1                        pin;    " Signals the second byte of RTS
+Inc                         pin;    " Signals an increment (normal operation)
+
+" Internal Signals
+Load                        node;   " Signals the PC to be loaded (clears PC)
+Relative12..Relative0       node;   " Result of source select
+Carry13..Carry0             node;   " Carry bits for addition
+Sum12..Sum0                 node;   " Result of PC + relative address
+
+" Output Signals
+ProgAddr12..ProgAddr0       pin     ISTYPE 'KEEP';      " Program address bits
+PC12..PC0                   pin     ISTYPE 'REG, KEEP'; " Program counter bits
+
+" Busses and Constants
+DirectAddr = [Direct12..Direct0];
+PC = [PC12..PC0];
+ProgAddrBus = [ProgAddr12..ProgAddr0];
+CarryBus = [Carry13..Carry0];
+SumAddr = [Sum12..Sum0];
+RelativeAddr = [Relative12..Relative0];
+ONE = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+" Sign extended
+SOffset = [Offset7, Offset7, Offset7, Offset7, Offset7, Offset7..Offset0];
+
+
+
+EQUATIONS
+" Connect the clock and reset signals to the PC
+PC.CLK = Clock;
+PC.CLR = !Reset;
+
+" The low bit of carry is always 0
+Carry0 = 0;
+
+" If Hold, then change nothing. If relative, load the sign extended offset. If
+" direct, load the direct address. If the first bit of return, replace the
+" lower 8 bits of the PC with the return address. If the second bit of return,
+" replace the 5 high bits of the PC with the return address. If increment, then
+" set the relative address to 1, to increment the PC.
+RelativeAddr = !Hold & ((SOffset & Relative)
+                        # (DirectAddr & Direct)
+		                # ([PC12..PC8, Offset7..Offset0] & RTS0)
+                        # ([Offset4..Offset0, PC7..PC0] & RTS1)
+                        # (ONE & Inc));
+
+" Whether or not to clear the PC. For RTS1, the low bits of the PC have been
+" stored in the relative address, so as to preserve them.
+Load = Direct # RTS0 # RTS1;
+
+" Add the PC (possibly zeroed due to the LD signal) with the selected source
+SumAddr = (PC & !Load) $ RelativeAddr $ CarryBus[12..0];
+CarryBus[13..1] = ((PC & !Load) & RelativeAddr) 
+                    # (CarryBus[12..0] & ((PC & !Load) $ RelativeAddr));
+
+" Set the PC and ProgAddr to the result
+PC := SumAddr;
+ProgAddrBus = PC;
+
+END PAU
