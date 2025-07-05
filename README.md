@@ -88,14 +88,14 @@ Top-level integration module:
 ## File Structure
 
 ```
-caltech-ee10a/
+hdl-cpu/
 ├── README.md           # This file
 ├── CPUTemplate.abl     # Top-level CPU module
 ├── ALU.abl            # Arithmetic Logic Unit
 ├── CU.abl             # Control Unit
 ├── PAU.abl            # Program Address Unit
 ├── DAU.abl            # Data Access Unit
-└── instructions.xlsx   # Instruction set documentation
+└── instructions.xlsx   # Instruction set signal bookkeeping
 ```
 
 ## Technical Details
